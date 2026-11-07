@@ -1,6 +1,6 @@
 # NoTrack Panel
 
-**0.1.0 — prerelease.** A single-operator browser panel and a **text-only subset** of the OpenAI chat-completions schema for NoTrack's web-chat backend.
+**0.1.1 — prerelease.** A single-operator browser panel and a **text-only subset** of the OpenAI chat-completions schema for NoTrack's web-chat backend.
 
 [راهنمای فارسی / Persian quickstart](README.fa.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [MIT license](LICENSE)
 
@@ -90,8 +90,9 @@ second = client.chat.completions.create(
 The Python client does not read this project's `.env` automatically. Load the token securely in the client process; do not hard-code it. Session IDs are a panel extension, not a standard OpenAI field. For streaming (`stream=True`), session ID is available as the `X-Session-Id` response header and an extra `session_id` field inside standard chat-completion chunks; no unrelated metadata event is injected.
 
 - **Text only**: messages with supported text roles/content, model, streaming, and the panel's `session_id` extension. No images, audio, tool/function calls, or structured-output guarantees.
-- `tools`, `max_tokens`, `temperature`, and other unsupported parameters are **rejected**, not silently accepted. SDK defaults/frameworks may send unsupported fields; disable those or use a minimal HTTP request.
-- Upstream supplies no reliable token accounting here. **`usage` is omitted**, not fabricated from characters. Do not use this gateway for token-based billing.
+- Minis' model-test defaults are accepted: `max_completion_tokens` (a strict positive integer up to 1,000,000) and `stream_options: {"include_usage": true|false}`. **The token limit is advisory only** because this web backend cannot enforce it. When supplied, `X-NoTrack-Token-Limit: advisory-only` and a `notrack.warnings` extension disclose that limitation; the warning appears in the first streaming chunk or the non-streaming response. These client options are not forwarded to the web dispatcher.
+- `tools`, legacy `max_tokens`, `temperature`, and other unsupported parameters remain **rejected**, not silently accepted. Native function/tool calling and a full Minis Agent session are not supported.
+- Upstream supplies no reliable token accounting here. **`usage` is omitted**, even when requested, not fabricated from characters. `X-NoTrack-Usage: unavailable` and the requested-usage warning disclose this. Do not use this gateway for token-based billing.
 - **Stateful**: reuse the returned `session_id` and send the next user turn. The server reuses the upstream chat; session IDs do not provide user isolation.
 - **Stateless**: omit `session_id` and send history in `messages`. History must fit the conservative instruction budget; **long histories error**. There is no silent truncation. Summarize explicitly or use a stateful session.
 

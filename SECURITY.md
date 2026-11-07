@@ -2,7 +2,7 @@
 
 ## Status
 
-0.1.0 is a prerelease, not an audited or production-hardened multi-tenant service. Security fixes target the current prerelease; there is no guaranteed response time or long-term support promise. Update before exposing it remotely.
+0.1.1 is a prerelease, not an audited or production-hardened multi-tenant service. Security fixes target the current prerelease; there is no guaranteed response time or long-term support promise. Update before exposing it remotely.
 
 ## Report a vulnerability
 

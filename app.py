@@ -36,7 +36,7 @@ async def lifespan(app):
     await client.close()
 
 
-app = FastAPI(title='NoTrack Panel', version='0.1.0', docs_url=None,
+app = FastAPI(title='NoTrack Panel', version='0.1.1', docs_url=None,
               redoc_url=None, openapi_url=None, lifespan=lifespan)
 
 
@@ -94,12 +94,28 @@ class Message(BaseModel):
     content: str = Field(max_length=16000)
 
 
+class StreamOptions(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    include_usage: bool = Field(default=False, strict=True)
+
+
 class OpenAIRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     model: str = 'notrack-uncensored'
     messages: list[Message] = Field(min_length=1, max_length=100)
     stream: bool = False
     session_id: Optional[str] = Field(default=None, max_length=64)
+    # ponytail: web dispatch has no native token cap or token accounting — upgrade to the official API when exact budgets/usage are required.
+    max_completion_tokens: Optional[int] = Field(default=None, ge=1, le=1000000, strict=True)
+    stream_options: Optional[StreamOptions] = None
+
+    def compatibility_warnings(self) -> list[str]:
+        warnings = []
+        if self.max_completion_tokens is not None:
+            warnings.append('max_completion_tokens is advisory only: the web backend cannot enforce a token limit.')
+        if self.stream_options and self.stream_options.include_usage:
+            warnings.append('Token usage is unavailable from the web backend; no usage totals will be fabricated.')
+        return warnings
 
 
 def _speaker_from_model(model: str) -> tuple[str, str]:
@@ -286,11 +302,19 @@ async def v1_chat(req: OpenAIRequest):
     STATS['requests'] += 1
     rid = 'chatcmpl-' + uuid.uuid4().hex
     created = int(time.time())
+    warnings = req.compatibility_warnings()
+    response_headers = {'X-Session-Id': sess.id, 'X-Accel-Buffering': 'no',
+                        'X-NoTrack-Usage': 'unavailable'}
+    if req.max_completion_tokens is not None:
+        response_headers['X-NoTrack-Token-Limit'] = 'advisory-only'
 
     def chunk(delta, reason=None):
-        return {'id': rid, 'object': 'chat.completion.chunk', 'created': created,
-                'model': req.model, 'session_id': sess.id,
-                'choices': [{'index': 0, 'delta': delta, 'finish_reason': reason}]}
+        result = {'id': rid, 'object': 'chat.completion.chunk', 'created': created,
+                  'model': req.model, 'session_id': sess.id,
+                  'choices': [{'index': 0, 'delta': delta, 'finish_reason': reason}]}
+        if delta.get('role') == 'assistant' and warnings:
+            result['notrack'] = {'warnings': warnings}
+        return result
 
     if req.stream:
         async def sse():
@@ -310,17 +334,19 @@ async def v1_chat(req: OpenAIRequest):
             finally:
                 BUSY.discard(sess.id)
             yield 'data: [DONE]\n\n'
-        return StreamingResponse(sse(), media_type='text/event-stream',
-                headers={'X-Session-Id': sess.id, 'X-Accel-Buffering': 'no'})
+        return StreamingResponse(sse(), media_type='text/event-stream', headers=response_headers)
 
     try:
         parts = []
         async for ev in _turn(sess, text, speaker, persona):
             if ev.type == 'delta':
                 parts.append(ev.text)
-        return {'id': rid, 'object': 'chat.completion', 'created': created,
-                'model': req.model, 'session_id': sess.id,
-                'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': ''.join(parts)}, 'finish_reason': 'stop'}]}
+        result = {'id': rid, 'object': 'chat.completion', 'created': created,
+                  'model': req.model, 'session_id': sess.id,
+                  'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': ''.join(parts)}, 'finish_reason': 'stop'}]}
+        if warnings:
+            result['notrack'] = {'warnings': warnings}
+        return JSONResponse(result, headers=response_headers)
     except UpstreamError as exc:
         STATS['errors'] += 1
         return JSONResponse({'error': {'type': exc.code, 'message': exc.message}}, status_code=_status(exc),

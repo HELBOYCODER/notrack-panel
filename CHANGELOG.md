@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1 — prerelease
+
+### Fixed
+
+- Accept the `max_completion_tokens` and `stream_options.include_usage` defaults sent by Minis model tests and standard text-model calls; these previously failed validation with HTTP 422.
+- Keep validation strict for option types and unknown fields. Unsupported tools, sampling controls, and legacy `max_tokens` remain rejected.
+- Explicitly disclose that completion-token budgets are advisory and real token usage is unavailable using response headers and `notrack.warnings`; do not invent usage or pretend to enforce a native token cap.
+- Added nine offline compatibility regressions; all 75 Python and four Node tests pass.
+- Verified real standard `minis-model-use` requests, the 128-token model-test request, a Persian question, and a full SSE stream ending with `finish_reason: stop` and `[DONE]` on the deployed service. This verifies text connectivity, not full Agent/tool support.
+
 ## 0.1.0 — prerelease
 
 Initial public prerelease; interfaces and the unofficial upstream may change.
