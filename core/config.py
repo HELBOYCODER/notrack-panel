@@ -36,6 +36,9 @@ PERSONAS = ["normal", "concise", "detailed", "creative"]
 # Measured against the live endpoint during recon.
 INSTRUCTION_CHAR_CAP = 1980      # >2000 -> instr_refused{reason: too_long}
 USER_INPUT_CAP = 4000            # free tier; plus=12000, pro=20000
+MAX_REQUEST_BYTES = int(os.environ.get('PANEL_MAX_REQUEST_BYTES', '1048576'))
+if not 1 <= MAX_REQUEST_BYTES <= 1048576:
+    raise ValueError('PANEL_MAX_REQUEST_BYTES must be between 1 and 1048576')
 
 # ---------------------------------------------------------------- pacing
 # ponytail: intentionally one process, one worker, one operator, one stable uid.

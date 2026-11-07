@@ -1,6 +1,6 @@
 # NoTrack Panel
 
-**0.1.1 — prerelease.** A single-operator browser panel and a **text-only subset** of the OpenAI chat-completions schema for NoTrack's web-chat backend.
+**0.1.2 — prerelease.** A single-operator browser panel and a **text-only subset** of the OpenAI chat-completions schema for NoTrack's web-chat backend.
 
 [راهنمای فارسی / Persian quickstart](README.fa.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [MIT license](LICENSE)
 
@@ -97,6 +97,10 @@ The Python client does not read this project's `.env` automatically. Load the to
 - **Stateless**: omit `session_id` and send history in `messages`. History must fit the conservative instruction budget; **long histories error**. There is no silent truncation. Summarize explicitly or use a stateful session.
 
 ### Limits, identity, and model labels
+
+HTTP request bodies are buffered with a **1 MiB (1,048,576 bytes)** hard ceiling, replacing the earlier 64 KiB gate that caused Minis HTTP 413 errors. Set `PANEL_MAX_REQUEST_BYTES` to a lower positive value if needed, then restart; the setting cannot disable or exceed the ceiling. Declared and streamed byte counts are checked before JSON parsing; compressed requests are not accepted. Validation errors do not echo rejected prompts or tool schemas.
+
+**This is a transport limit, not expanded model context or Agent support.** A large tools schema still receives an explicit text-only 422, and an over-budget system/history receives 400. Nothing is silently stripped or truncated. For native tools and larger contexts use a genuine supported API, such as the direct [Venice → Minis setup](docs/VENICE-MINIS.md), not this web adapter.
 
 Conservative local limits informed by observations are **4000 input characters** and about **1980 system/instruction characters** (including folded stateless history). These are character budgets, not token limits or exact upstream contractual limits; upstream may reject smaller requests or change behavior.
 

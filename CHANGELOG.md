@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.2 — prerelease
+
+### Fixed
+
+- Replace the hardcoded 64 KiB HTTP request gate with bounded streaming-aware buffering, default/hard ceiling 1 MiB; configurable downward with `PANEL_MAX_REQUEST_BYTES`.
+- Check declared and actual bytes without trusting Content-Length; reject malformed/conflicting headers, compressed bodies, and oversize input before JSON parsing/upstream dispatch.
+- Sanitize validation errors so rejected messages/tool schemas are not echoed; unsupported Agent tools remain explicit errors rather than being silently dropped.
+- Added 19 body-limit regression cases; all 94 Python and four Node tests pass. Verified a real >64 KiB valid request returning `BODY_70K_OK`, the HTTPS oversize safety guard, and normal Minis text inference.
+- Document direct Venice API setup for Minis; no Venice key, account access, or successful inference is implied by public model discovery.
+
 ## 0.1.1 — prerelease
 
 ### Fixed

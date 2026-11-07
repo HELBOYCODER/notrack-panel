@@ -1,0 +1,11 @@
+{
+  "label": "Venice Official",
+  "providerType": "openAI",
+  "credentialType": "apiKey",
+  "customBaseURL": "https://api.venice.ai/api/v1",
+  "appendV1Suffix": false,
+  "useResponsesAPI": false,
+  "azureMode": false,
+  "apiKey": "$$VENICE_API_KEY",
+  "isEnabled": true
+}

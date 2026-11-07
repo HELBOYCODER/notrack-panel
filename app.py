@@ -12,7 +12,9 @@ from contextlib import asynccontextmanager
 from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from core.body_limit import RequestBodyLimitMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -36,8 +38,17 @@ async def lifespan(app):
     await client.close()
 
 
-app = FastAPI(title='NoTrack Panel', version='0.1.1', docs_url=None,
+app = FastAPI(title='NoTrack Panel', version='0.1.2', docs_url=None,
               redoc_url=None, openapi_url=None, lifespan=lifespan)
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=config.MAX_REQUEST_BYTES)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(request, exc):
+    # Do not echo rejected tools, prompts, credentials, or their raw values.
+    return JSONResponse({'error': {'type': 'unsupported_request',
+        'message': 'This adapter is text-only. Native tools, tool messages, images, and unsupported parameters are not accepted.'},
+        'detail': [{'type': error['type'], 'loc': error['loc']} for error in exc.errors()]}, status_code=422)
 
 
 @app.middleware('http')
@@ -63,13 +74,6 @@ async def private_panel(request: Request, call_next):
         origin = request.headers.get('origin')
         if origin and origin != str(request.base_url).rstrip('/'):
             return JSONResponse({'error': {'type': 'origin', 'message': 'Cross-origin writes are not allowed.'}}, status_code=403)
-        try:
-            if int(request.headers.get('content-length', '0')) > 65536:
-                return JSONResponse({'error': 'Request too large'}, status_code=413)
-        except ValueError:
-            return JSONResponse({'error': 'Invalid Content-Length'}, status_code=400)
-        if len(await request.body()) > 65536:
-            return JSONResponse({'error': 'Request too large'}, status_code=413)
     response = await call_next(request)
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
