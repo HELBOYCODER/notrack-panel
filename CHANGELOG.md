@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 — prerelease
+
+### Added
+
+- New opt-in model **`notrack-chat`** for agent clients such as Minis chat. Real chat turns send a long system prompt and tool definitions, which the strict model rejects with 422. `notrack-chat` deliberately drops system/developer prompts, tool definitions, tool messages and non-text parts, keeps the newest user/assistant turns within the web budget, and reports every dropped item in `X-NoTrack-Chat-Mode`. Tools are **not** executed.
+- `notrack-uncensored` stays strict and its 422 message now points to `notrack-chat`.
+- Five new regression tests (99 total). Verified live: a ~117 KB streamed agent-style request (large system prompt + 30 tools) returned the correct answer, and a multi-turn Persian chat with tools remembered context through `minis-model-use`.
+
 ## 0.1.2 — prerelease
 
 ### Fixed

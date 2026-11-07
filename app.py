@@ -16,7 +16,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from core.body_limit import RequestBodyLimitMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from core import chat_mode
 
 from core import config
 from core.pool import IdentityPool
@@ -38,7 +39,7 @@ async def lifespan(app):
     await client.close()
 
 
-app = FastAPI(title='NoTrack Panel', version='0.1.2', docs_url=None,
+app = FastAPI(title='NoTrack Panel', version='0.1.3', docs_url=None,
               redoc_url=None, openapi_url=None, lifespan=lifespan)
 app.add_middleware(RequestBodyLimitMiddleware, max_bytes=config.MAX_REQUEST_BYTES)
 
@@ -200,7 +201,9 @@ async def models():
     return {'object': 'list', 'data': [
         {'id': 'notrack-uncensored', 'object': 'model', 'owned_by': 'unverified-web-label'},
         {'id': 'notrack-minimax', 'object': 'model', 'owned_by': 'unverified-web-label', 'experimental': True},
-        {'id': 'notrack-chatgpt', 'object': 'model', 'owned_by': 'unverified-web-label', 'experimental': True}]}
+        {'id': 'notrack-chatgpt', 'object': 'model', 'owned_by': 'unverified-web-label', 'experimental': True},
+        {'id': 'notrack-chat', 'object': 'model', 'owned_by': 'unverified-web-label',
+         'description': 'Chat-only mode for agent clients: drops tools and system prompts, keeps recent conversation.'}]}
 
 
 @app.post('/api/probe')
@@ -292,6 +295,34 @@ async def panel_chat(req: ChatRequest):
 
 
 @app.post('/v1/chat/completions')
+async def v1_chat_entry(request: Request):
+    try:
+        body = json.loads(await request.body() or b'{}')
+    except (ValueError, UnicodeDecodeError):
+        return JSONResponse({'error': {'type': 'invalid_json', 'message': 'Body must be JSON.'}}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({'error': {'type': 'invalid_json', 'message': 'Body must be a JSON object.'}}, status_code=400)
+    notes: list[str] = []
+    if str(body.get('model', '')).lower() == chat_mode.CHAT_MODEL:
+        if body.get('session_id'):
+            return JSONResponse({'error': {'type': 'unsupported_request',
+                'message': 'notrack-chat is stateless; omit session_id.'}}, status_code=400)
+        try:
+            body, notes = chat_mode.convert(body, config.INSTRUCTION_CHAR_CAP, config.USER_INPUT_CAP)
+        except ValueError as exc:
+            return JSONResponse({'error': {'type': 'unsupported_request', 'message': str(exc)}}, status_code=400)
+    try:
+        req = OpenAIRequest.model_validate(body)
+    except ValidationError as exc:
+        return JSONResponse({'error': {'type': 'unsupported_request',
+            'message': 'This adapter is text-only. Native tools, tool messages, images, and unsupported parameters are not accepted. Use model notrack-chat for agent clients.'},
+            'detail': [{'type': e['type'], 'loc': e['loc']} for e in exc.errors()]}, status_code=422)
+    response = await v1_chat(req)
+    if notes:
+        response.headers['X-NoTrack-Chat-Mode'] = '; '.join(notes)[:900]
+    return response
+
+
 async def v1_chat(req: OpenAIRequest):
     speaker, override = _speaker_from_model(req.model)
     persona = override or 'normal'
