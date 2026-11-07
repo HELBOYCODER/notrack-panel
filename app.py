@@ -39,7 +39,7 @@ async def lifespan(app):
     await client.close()
 
 
-app = FastAPI(title='NoTrack Panel', version='0.1.3', docs_url=None,
+app = FastAPI(title='NoTrack Panel', version='0.2.0', docs_url=None,
               redoc_url=None, openapi_url=None, lifespan=lifespan)
 app.add_middleware(RequestBodyLimitMiddleware, max_bytes=config.MAX_REQUEST_BYTES)
 

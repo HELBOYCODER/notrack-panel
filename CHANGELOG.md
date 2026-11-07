@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 — prerelease
+
+### Added
+
+- `local-llm/setup.sh`: self-hosted uncensored model via llama.cpp (default Qwen2.5-3B abliterated Q4_K_M, SHA-256 verified), loopback-only with a private API key; optional `--service` systemd unit.
+- `local-llm/test.sh`: checks 401 without key, a Persian answer, and native tool calling.
+- `docs/LOCAL-LLM.md` (English + Persian): install, security, Minis connection, measured performance.
+- Verified on a 2-vCPU / 3.7 GB server: setup is idempotent, 401 without key, Persian answer, `shell_execute` tool call; ~3 tokens/s.
+
 ## 0.1.3 — prerelease
 
 ### Added

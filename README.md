@@ -1,6 +1,8 @@
 # NoTrack Panel
 
-**0.1.3 — prerelease.** For agent clients (e.g. Minis chat) use model **`notrack-chat`**: it explicitly drops system prompts and tools and sends only the recent conversation (reported in `X-NoTrack-Chat-Mode`); tools are not executed. A single-operator browser panel and a **text-only subset** of the OpenAI chat-completions schema for NoTrack's web-chat backend.
+**0.1.3 — prerelease.** For agent clients (e.g. Minis chat) use model **`notrack-chat`**: it explicitly drops system prompts and tools and sends only the recent conversation (reported in `X-NoTrack-Chat-Mode`); tools are not executed.
+
+**Need tools or no quotas?** Run a free self-hosted uncensored model with real tool calling: [docs/LOCAL-LLM.md](docs/LOCAL-LLM.md) (`bash local-llm/setup.sh --service`). A single-operator browser panel and a **text-only subset** of the OpenAI chat-completions schema for NoTrack's web-chat backend.
 
 [راهنمای فارسی / Persian quickstart](README.fa.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [MIT license](LICENSE)
 
