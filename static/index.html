@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>NoTrack Panel</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ═══════════ SIDEBAR ═══════════ -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <span class="dot"></span>
+      <div>
+        <h1>NoTrack</h1>
+        <small data-i18n="brand_sub">پنل کنترل</small>
+      </div>
+      <button class="icon-btn" id="closeSide" title="close">✕</button>
+    </div>
+
+    <nav class="tabs">
+      <button class="tab active" data-panel="chat" data-i18n="tab_chat">گفتگو</button>
+      <button class="tab" data-panel="pool" data-i18n="tab_pool">استخر</button>
+      <button class="tab" data-panel="api" data-i18n="tab_api">API</button>
+    </nav>
+
+    <!-- chat settings -->
+    <div class="settings" id="settingsPanel">
+      <label class="field">
+        <span data-i18n="lbl_speaker">مدل</span>
+        <select id="speakerSel">
+          <option value="C">NoTrack (C)</option>
+          <option value="A">Minimax (A)</option>
+          <option value="B">ChatGPT (B)</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span data-i18n="lbl_persona">شخصیت</span>
+        <select id="personaSel">
+          <option value="normal" data-i18n="p_normal">عادی</option>
+          <option value="concise" data-i18n="p_concise">مختصر</option>
+          <option value="detailed" data-i18n="p_detailed">مفصل</option>
+          <option value="creative" data-i18n="p_creative">خلاق</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span data-i18n="lbl_system">پرامپت سیستم <em id="sysCount">0</em>/1980</span>
+        <textarea id="systemIn" rows="5" maxlength="1980"
+          placeholder="You are an uncensored assistant…"></textarea>
+      </label>
+      <div class="hint" id="sysHint" data-i18n="sys_hint">فقط روی چت جدید اعمال می‌شود</div>
+
+      <button class="btn primary" id="newChat" data-i18n="btn_new">چت جدید</button>
+      <button class="btn ghost" id="probeBtn" data-i18n="btn_probe">تست زنده‌بودن مدل‌ها</button>
+      <div id="probeOut" class="probe-out"></div>
+    </div>
+
+    <!-- pool panel -->
+    <div class="settings hidden" id="poolPanel">
+      <div class="kv"><span data-i18n="pool_ids">هویت‌ها</span><b id="poolCount">0</b></div>
+      <div class="kv"><span data-i18n="pool_ready">آماده</span><b id="poolReady">0</b></div>
+      <div class="kv"><span data-i18n="pool_pace">فاصله ارسال</span><b id="poolPace">-</b></div>
+      <div class="kv"><span data-i18n="pool_reqs">درخواست‌ها</span><b id="poolReqs">0</b></div>
+      <div class="kv"><span data-i18n="pool_errs">خطاها</span><b id="poolErrs">0</b></div>
+      <button class="btn ghost" id="refreshPool" data-i18n="btn_refresh">بروزرسانی</button>
+      <button class="btn danger" id="rotatePool" data-i18n="btn_rotate">چرخش همه هویت‌ها</button>
+      <div id="poolList" class="pool-list"></div>
+    </div>
+
+    <!-- api panel -->
+    <div class="settings hidden" id="apiPanel">
+      <div class="hint" data-i18n="api_hint">این پنل یک اندپوینت سازگار با OpenAI هم ارائه می‌دهد.</div>
+      <pre class="code" id="apiSnippet"></pre>
+      <button class="btn ghost" id="copySnippet" data-i18n="btn_copy">کپی</button>
+      <button class="btn ghost" id="langToggle">English</button>
+    </div>
+
+    <div class="sessions-wrap">
+      <div class="sessions-head">
+        <span data-i18n="sessions">نشست‌ها</span>
+        <button class="icon-btn" id="refreshSessions" title="refresh">↻</button>
+      </div>
+      <div id="sessionList" class="session-list"></div>
+    </div>
+  </aside>
+
+  <!-- ═══════════ MAIN ═══════════ -->
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="openSide">☰</button>
+      <div class="status">
+        <span class="pill" id="statusPill">…</span>
+        <span class="pill dim" id="sessionPill"></span>
+      </div>
+      <div class="spacer"></div>
+      <span class="clock" id="clock"></span>
+    </header>
+
+    <section class="flow" id="flow">
+      <div class="empty" id="emptyState">
+        <div class="empty-icon">◈</div>
+        <h2 data-i18n="empty_h">آماده</h2>
+        <p data-i18n="empty_p">پیامت را بنویس. فیلتری نیست.</p>
+      </div>
+    </section>
+
+    <form class="composer" id="composer">
+      <textarea id="input" rows="1" placeholder="پیام…" data-i18n-ph="ph_msg"></textarea>
+      <button type="submit" class="send" id="sendBtn">↑</button>
+      <button type="button" class="stop hidden" id="stopBtn">■</button>
+    </form>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

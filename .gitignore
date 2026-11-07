@@ -1,0 +1,30 @@
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# ─── runtime state (contains your pool + sessions) ───
+data/
+*.json.tmp
+
+# ─── OS / editor ───
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# ─── local secrets / keys ───
+*.pem
+.env
+.env.*
+!.env.example
+
+# ─── logs ───
+*.log
+logs/
