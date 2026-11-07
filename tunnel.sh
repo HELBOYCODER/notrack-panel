@@ -1,104 +1,58 @@
 #!/usr/bin/env bash
-# ─────────────────────────────────────────────────────────────
-#  Expose the panel to the internet without opening a port.
-#
-#  Most VPS providers (AWS, GCP, Oracle, Hetzner) firewall everything
-#  except 22/80/443 by default. Instead of fighting that, this tunnels
-#  outbound with Cloudflare — no inbound port, no security-group edit,
-#  and you get HTTPS for free.
-#
-#    ./tunnel.sh quick      throwaway *.trycloudflare.com URL (no account)
-#    ./tunnel.sh named      permanent URL on your own Cloudflare domain
-#    ./tunnel.sh stop       kill the tunnel
-# ─────────────────────────────────────────────────────────────
+# Optional foreground tunnel. Never installs cloudflared or starts by default.
 set -euo pipefail
-
-PORT="${PORT:-8080}"
-LOG="${TMPDIR:-/tmp}/notrack-tunnel.log"
-PIDFILE="${TMPDIR:-/tmp}/notrack-tunnel.pid"
-
-say() { printf '\033[1;32m▸\033[0m %s\n' "$*"; }
-err() { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; }
-
-need_cloudflared() {
-  command -v cloudflared >/dev/null && return 0
-  err "cloudflared not installed"
-  cat <<'EOF'
-
-  Install it:
-
-    # Debian / Ubuntu (amd64)
-    curl -L -o /tmp/cloudflared \
-      https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-    sudo install -m 755 /tmp/cloudflared /usr/local/bin/cloudflared
-
-    # macOS
-    brew install cloudflared
-
-EOF
+cd "$(dirname "${BASH_SOURCE[0]}")"
+if [ "${1:-}" != quick ] || [ "$#" != 1 ]; then
+  echo 'Usage: ./tunnel.sh quick (explicitly exposes your running panel via HTTPS)'
+  echo 'Stop with Ctrl+C. Install cloudflared yourself from official Cloudflare docs.'
+  echo 'Named tunnels: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/'
+  exit 2
+fi
+command -v cloudflared >/dev/null || {
+  echo 'cloudflared missing. Install manually: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/' >&2
   exit 1
 }
-
-case "${1:-quick}" in
-  quick)
-    need_cloudflared
-    say "starting quick tunnel on :$PORT"
-    : > "$LOG"
-    nohup cloudflared tunnel --url "http://127.0.0.1:$PORT" --no-autoupdate \
-      > "$LOG" 2>&1 &
-    echo $! > "$PIDFILE"
-
-    URL=""
-    for _ in $(seq 1 30); do
-      URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG" 2>/dev/null | head -1 || true)
-      [ -n "$URL" ] && break
-      sleep 1
-    done
-
-    if [ -z "$URL" ]; then
-      err "no URL after 30s — see $LOG"
-      tail -20 "$LOG" || true
-      exit 1
-    fi
-
-    echo
-    echo "  ═══════════════════════════════════════════════"
-    echo "   panel : $URL/"
-    echo "   api   : $URL/v1"
-    echo "  ═══════════════════════════════════════════════"
-    echo
-    echo "  This URL lives until the process dies. For a"
-    echo "  permanent one: ./tunnel.sh named"
-    ;;
-
-  named)
-    need_cloudflared
-    HOSTNAME_="${2:-}"
-    if [ -z "$HOSTNAME_" ]; then
-      echo "usage: ./tunnel.sh named panel.example.com"
-      echo
-      echo "one-time setup:"
-      echo "  cloudflared tunnel login"
-      echo "  cloudflared tunnel create notrack"
-      exit 1
-    fi
-    say "routing $HOSTNAME_ -> http://127.0.0.1:$PORT"
-    cloudflared tunnel --url "http://127.0.0.1:$PORT" \
-      --hostname "$HOSTNAME_" --no-autoupdate
-    ;;
-
-  stop)
-    if [ -f "$PIDFILE" ]; then
-      kill "$(cat "$PIDFILE")" 2>/dev/null || true
-      rm -f "$PIDFILE"
-      say "tunnel stopped"
-    else
-      pkill -f "cloudflared tunnel" 2>/dev/null && say "tunnel stopped" || echo "no tunnel running"
-    fi
-    ;;
-
-  *)
-    echo "usage: ./tunnel.sh [quick|named <hostname>|stop]"
-    exit 1
-    ;;
-esac
+[ -x .venv/bin/python ] && [ -f .env ] && [ ! -L .env ] || {
+  echo 'Run bash install.sh and ./run.sh first.' >&2; exit 1;
+}
+PORT="$(.venv/bin/python - <<'PY'
+import os
+from dotenv import load_dotenv
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+load_dotenv('.env')
+token = os.environ.get('PANEL_TOKEN', '').strip()
+if not token:
+    raise SystemExit('PANEL_TOKEN is required; refusing public exposure.')
+if os.environ.get('HOST', '127.0.0.1') not in ('127.0.0.1', 'localhost', '::1'):
+    raise SystemExit('Set HOST=127.0.0.1 and restart the server before tunneling.')
+try:
+    port = int(os.environ.get('PORT', '8080'))
+    if not 1 <= port <= 65535:
+        raise ValueError
+except ValueError:
+    raise SystemExit('Invalid PORT.')
+base = f'http://127.0.0.1:{port}'
+try:
+    for path in ('/', '/api/health', '/v1/models'):
+        try:
+            with urlopen(base + path, timeout=5):
+                raise SystemExit('Unauthenticated access succeeded; refusing public exposure.')
+        except HTTPError as exc:
+            if exc.code != 401:
+                raise SystemExit('Expected authentication challenge; refusing public exposure.')
+            if path == '/' and not exc.headers.get('WWW-Authenticate', '').lower().startswith('basic'):
+                raise SystemExit('Browser Basic authentication is required.')
+    req = Request(base + '/api/health', headers={'Authorization': 'Bearer ' + token})
+    with urlopen(req, timeout=5) as response:
+        if response.status != 200:
+            raise SystemExit('Authenticated health check failed.')
+except (HTTPError, URLError, OSError):
+    raise SystemExit('Cannot verify local authenticated server; start ./run.sh first.')
+print(port)
+PY
+)"
+echo 'Exposing one shared-history panel. Use ONLY the HTTPS URL printed by cloudflared.' >&2
+echo 'Login: panel / your local PANEL_TOKEN. Anyone with it can read/delete all history.' >&2
+echo 'Ctrl+C stops this foreground tunnel; the panel stays local.' >&2
+exec cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$PORT"

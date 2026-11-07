@@ -38,12 +38,12 @@ INSTRUCTION_CHAR_CAP = 1980      # >2000 -> instr_refused{reason: too_long}
 USER_INPUT_CAP = 4000            # free tier; plus=12000, pro=20000
 
 # ---------------------------------------------------------------- pacing
-# The upstream limiter is bursty and apparently layered (per-uid AND per-IP).
-# Observed: 2 rapid requests on one uid pass, the 3rd 429s. We pace conservatively
-# and back off adaptively rather than trying to squeeze the last request out.
-PACE_MIN_INTERVAL = float(os.environ.get("PANEL_PACE", "1.9"))   # seconds between sends
-PACE_MAX_INTERVAL = 12.0
-MAX_RETRIES = 5
+# ponytail: intentionally one process, one worker, one operator, one stable uid.
+# Pacing is not a quota workaround; refusals are returned without automatic retry.
+PACE_MIN_INTERVAL = max(5.0, float(os.environ.get("PANEL_PACE", "5.0")))
+PACE_MAX_INTERVAL = PACE_MIN_INTERVAL  # compatibility; no adaptive acceleration
+RATE_LIMIT_COOLDOWN = 60.0
+MAX_RETRY_AFTER = 3600.0
 REQUEST_TIMEOUT = 180.0
 
 # ---------------------------------------------------------------- panel auth

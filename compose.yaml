@@ -1,0 +1,22 @@
+services:
+  panel:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      PANEL_TOKEN: "${PANEL_TOKEN:?Set a strong PANEL_TOKEN in the private .env first}"
+      PANEL_DATA: /app/data
+      PANEL_PACE: "${PANEL_PACE:-5.0}"
+    volumes:
+      - panel-data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    init: true
+    restart: unless-stopped
+
+# Docker populates a new volume from the image's UID/GID 10001-owned directory.
+# Do not substitute an unprepared root-owned host bind mount.
+volumes:
+  panel-data:

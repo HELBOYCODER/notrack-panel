@@ -2,7 +2,7 @@
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NoTrack Panel</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -22,7 +22,7 @@
 
     <nav class="tabs">
       <button class="tab active" data-panel="chat" data-i18n="tab_chat">گفتگو</button>
-      <button class="tab" data-panel="pool" data-i18n="tab_pool">استخر</button>
+      <button class="tab" data-panel="pool" data-i18n="tab_pool">وضعیت</button>
       <button class="tab" data-panel="api" data-i18n="tab_api">API</button>
     </nav>
 
@@ -48,7 +48,7 @@
       </label>
 
       <label class="field">
-        <span data-i18n="lbl_system">پرامپت سیستم <em id="sysCount">0</em>/1980</span>
+        <span><span data-i18n="lbl_system">پرامپت سیستم</span> <em id="sysCount">0</em>/1980</span>
         <textarea id="systemIn" rows="5" maxlength="1980"
           placeholder="You are an uncensored assistant…"></textarea>
       </label>
@@ -67,7 +67,6 @@
       <div class="kv"><span data-i18n="pool_reqs">درخواست‌ها</span><b id="poolReqs">0</b></div>
       <div class="kv"><span data-i18n="pool_errs">خطاها</span><b id="poolErrs">0</b></div>
       <button class="btn ghost" id="refreshPool" data-i18n="btn_refresh">بروزرسانی</button>
-      <button class="btn danger" id="rotatePool" data-i18n="btn_rotate">چرخش همه هویت‌ها</button>
       <div id="poolList" class="pool-list"></div>
     </div>
 
@@ -100,16 +99,16 @@
       <span class="clock" id="clock"></span>
     </header>
 
-    <section class="flow" id="flow">
+    <section class="flow" id="flow" aria-live="polite" aria-label="Conversation">
       <div class="empty" id="emptyState">
         <div class="empty-icon">◈</div>
         <h2 data-i18n="empty_h">آماده</h2>
-        <p data-i18n="empty_p">پیامت را بنویس. فیلتری نیست.</p>
+        <p data-i18n="empty_p">پیامت را بنویس؛ محدودیت‌های سرویس اصلی برقرار است.</p>
       </div>
     </section>
 
     <form class="composer" id="composer">
-      <textarea id="input" rows="1" placeholder="پیام…" data-i18n-ph="ph_msg"></textarea>
+      <textarea id="input" rows="1" maxlength="4000" aria-label="Message" placeholder="پیام…" data-i18n-ph="ph_msg"></textarea>
       <button type="submit" class="send" id="sendBtn">↑</button>
       <button type="button" class="stop hidden" id="stopBtn">■</button>
     </form>

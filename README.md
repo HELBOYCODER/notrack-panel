@@ -1,202 +1,155 @@
 # NoTrack Panel
 
-A control panel + OpenAI-compatible gateway in front of **notrack.ai**'s
-anonymous chat backend. Talk to the uncensored model from a clean UI, manage a
-pool of anonymous identities, and plug the same endpoint into any OpenAI client.
+**0.1.0 — prerelease.** A single-operator browser panel and a **text-only subset** of the OpenAI chat-completions schema for NoTrack's web-chat backend.
 
----
+[راهنمای فارسی / Persian quickstart](README.fa.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) · [MIT license](LICENSE)
 
-## What this actually is
+> Independent, unofficial project; not affiliated with NoTrack or OpenAI. The web backend may be undocumented and change without notice. There are no guarantees about availability, model identity, base architecture, version, or unfiltered output. This is **not** the official paid NoTrack API.
 
-notrack.ai's public site talks to `POST /api/dispatch`, which:
+## Install (Linux / macOS)
 
-- needs **no account and no API key** — a visitor gets an HttpOnly `uid` cookie
-- returns **server-sent events**, not JSON
-- meters the free tier **per uid**, and also appears to count from the IP
-- serves **three speakers**: `C` = NoTrack (its own model), `A` = Minimax, `B` = ChatGPT
-- accepts a `instructions` field that becomes the conversation's system prompt,
-  stored on the chat row and replayed on every later turn
-
-The panel wraps all of that: it holds a pool of uids, paces requests so the
-limiter never trips, retries transparently, and exposes both a browser UI and a
-`/v1/chat/completions` endpoint.
-
-## Quick start
+Requires Git, Bash, Python **3.10+**, and Python's `venv`/`ensurepip`. Install missing prerequisites with your preferred OS tools first. The default installer never invokes `apt` or `sudo`, installs no OS packages, creates no service, and does not launch the server.
 
 ```bash
+git clone https://github.com/HELBOYCODER/notrack-panel
+cd notrack-panel
+bash install.sh
 ./run.sh
-# or
-pip install -r requirements.txt
-python3 app.py
 ```
 
-Then open <http://localhost:8080/>.
+Open <http://127.0.0.1:8080/>. Your browser displays an **HTTP Basic login popup**:
 
-## The panel
+- Username: **`panel`**
+- Password: the **`PANEL_TOKEN`** value in your local `.env`
 
-Three tabs in the sidebar:
+The installer generates a cryptographically random token, writes `.env` with permissions **600**, and never prints the token. Read it only in your local editor, for example `nano .env`; do not paste it into issues, screenshots, logs, or chat. Re-running the installer preserves an existing token. An empty existing token must be replaced locally. Stop the foreground server with **Ctrl+C**.
 
-| Tab | What it does |
-|-----|--------------|
-| **گفتگو / Chat** | Pick speaker + persona, write a system prompt, chat with streaming and markdown |
-| **استخر / Pool** | Live view of every identity: request count, cooldown timer, adaptive send interval. Rotate the whole pool from here |
-| **API** | Copy-paste snippet for the OpenAI-compatible endpoint, language toggle (fa/en) |
+`run.sh` uses `.venv`, validates the token, loads `.env` with `python-dotenv`, and launches one Uvicorn worker with `--env-file .env`. Default binding is **`HOST=127.0.0.1`, `PORT=8080`**. Environment variables already set in the shell override `.env`. Do not run multiple workers, replicas, or processes against the same data directory.
 
-The pill in the header shows `ready/total · pace` — green means identities are
-available, amber means everything is cooling down.
+### Optional systemd user service (Linux only)
 
-### Speaker routing
+Explicit opt-in, run as your **current non-root user**, not with sudo:
 
-| Model name you send | Speaker | Notes |
-|---|---|---|
-| `notrack-uncensored` | `C` | NoTrack's own model, the default |
-| `notrack-minimax` | `A` | Minimax |
-| `notrack-chatgpt` | `B` | ChatGPT — was down during recon, probe before relying on it |
+```bash
+bash install.sh --service
+systemctl --user status notrack-panel
+journalctl --user -u notrack-panel -f
+# Stop and disable:
+systemctl --user disable --now notrack-panel
+```
 
-Suffix any of them to override persona: `notrack-uncensored:creative`,
-`notrack-uncensored:concise`, `:detailed`, `:notrack`, `:bare`.
+Uses the existing systemd user manager; no dedicated account or system-wide unit is created. The unit sets `NoNewPrivileges=true`, `PrivateTmp=true`, and `UMask=0077`; `.env` stays mode 600. User services and `PrivateTmp` require working systemd/user-namespace support. If unavailable, use `./run.sh`. Starting at boot before login may require administrator-enabled user lingering; the installer does not enable it.
 
-Use **Probe model liveness** to check which speakers actually answer right now
-rather than assuming.
+### Windows (manual PowerShell)
 
-## OpenAI-compatible API
+Use Python 3.10+; the Bash installer is for Linux/macOS. Clone the repository, enter its directory, then:
 
-Base URL `http://localhost:8080/v1`, any non-empty API key.
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\python -c "from pathlib import Path; import secrets; p=Path('.env'); p.exists() and exit('Existing .env preserved; edit it locally'); p.write_text('PANEL_TOKEN='+secrets.token_urlsafe(32)+'\nHOST=127.0.0.1\nPORT=8080\n', encoding='utf-8')"
+.\.venv\Scripts\python -m uvicorn app:app --env-file .env --host 127.0.0.1 --port 8080 --workers 1
+```
+
+Restrict `.env` and `data/` using Windows file ACLs before running; POSIX mode 600 is not a Windows ACL. Read the token in your local editor and use the same browser login. Missing/empty tokens fail closed.
+
+## Security and data
+
+- **Every `/api/*` and `/v1/*` route requires `PANEL_TOKEN`**, including health and model listings. Missing/empty configuration fails closed rather than exposing an anonymous API.
+- Browser access uses Basic auth (`panel` / token). Programmatic API requests use **`Authorization: Bearer <PANEL_TOKEN>`** with that same token, never an arbitrary API key. Keep the token out of URLs.
+- This is **one operator with shared history**, not a multi-tenant service. Anyone with the token can access/manage the panel's sessions; there are no per-user boundaries.
+- `data/` persists web identity and conversation state **in plaintext**; `.env` and local state are ignored by Git and excluded from Docker builds. They are not encrypted. Secure host access and backups; review staged files before publishing. Upstream also receives your messages and may retain chats.
+- Keep loopback binding. For remote access use HTTPS and preferably an additional access-control layer. Basic auth is only base64, not encryption. Never send credentials over public HTTP.
+
+See [SECURITY.md](SECURITY.md) for reporting and operational precautions.
+
+## API: deliberately limited compatibility
+
+Local base URL: `http://127.0.0.1:8080/v1`. Supported routes include `GET /v1/models` and `POST /v1/chat/completions`. Discover model IDs from the authenticated model listing. Example with the optional OpenAI Python client (`pip install openai` in your client environment):
 
 ```python
+import os
 from openai import OpenAI
 
-c = OpenAI(base_url="http://localhost:8080/v1", api_key="panel")
-
-r = c.chat.completions.create(
-    model="notrack-uncensored",
-    messages=[{"role": "user", "content": "Hello"}],
+client = OpenAI(
+    base_url="http://127.0.0.1:8080/v1",
+    api_key=os.environ["PANEL_TOKEN"],  # load your local secret securely
 )
-print(r.choices[0].message.content)
-```
-
-Streaming works exactly like OpenAI:
-
-```python
-for ch in c.chat.completions.create(
+first = client.chat.completions.create(
     model="notrack-uncensored",
-    messages=[{"role": "user", "content": "Count to five"}],
-    stream=True,
-):
-    if ch.choices and ch.choices[0].delta.content:
-        print(ch.choices[0].delta.content, end="")
+    messages=[{"role": "user", "content": "My dog is Biscuit."}],
+)
+print(first.choices[0].message.content)
+second = client.chat.completions.create(
+    model="notrack-uncensored",
+    messages=[{"role": "user", "content": "What is my dog's name?"}],
+    extra_body={"session_id": first.session_id},
+)
 ```
 
-### Two ways to keep context
+The Python client does not read this project's `.env` automatically. Load the token securely in the client process; do not hard-code it. Session IDs are a panel extension, not a standard OpenAI field. For streaming (`stream=True`), session ID is available as the `X-Session-Id` response header and an extra `session_id` field inside standard chat-completion chunks; no unrelated metadata event is injected.
 
-**Session mode** — the panel returns a `session_id` on every response. Pass it
-back as `session_id` in the body and the panel reuses the upstream chat:
+- **Text only**: messages with supported text roles/content, model, streaming, and the panel's `session_id` extension. No images, audio, tool/function calls, or structured-output guarantees.
+- `tools`, `max_tokens`, `temperature`, and other unsupported parameters are **rejected**, not silently accepted. SDK defaults/frameworks may send unsupported fields; disable those or use a minimal HTTP request.
+- Upstream supplies no reliable token accounting here. **`usage` is omitted**, not fabricated from characters. Do not use this gateway for token-based billing.
+- **Stateful**: reuse the returned `session_id` and send the next user turn. The server reuses the upstream chat; session IDs do not provide user isolation.
+- **Stateless**: omit `session_id` and send history in `messages`. History must fit the conservative instruction budget; **long histories error**. There is no silent truncation. Summarize explicitly or use a stateful session.
 
-```python
-r1 = c.chat.completions.create(model="notrack-uncensored",
-    messages=[{"role":"user","content":"My dog is Biscuit."}])
-r2 = c.chat.completions.create(model="notrack-uncensored",
-    messages=[{"role":"user","content":"What is my dog's name?"}],
-    extra_body={"session_id": r1.session_id})
+### Limits, identity, and model labels
+
+Conservative local limits informed by observations are **4000 input characters** and about **1980 system/instruction characters** (including folded stateless history). These are character budgets, not token limits or exact upstream contractual limits; upstream may reject smaller requests or change behavior.
+
+One **server-issued persistent web identity** is retained. Requests are **globally serialized** in one server process. There is no UID rotation, identity pool farming, or quota evasion. Upstream rate limits are returned to callers, not bypassed by minting identities; wait before retrying and honor upstream terms. `PANEL_PACE` is a pacing setting, not a throughput guarantee.
+
+Legacy experimental speaker labels **A/B** and aliases containing names such as Minimax or ChatGPT are routing labels only: they do not verify the provider, architecture, or version. **B previously failed**; neither it nor any alternative is promised to work. The `notrack-uncensored` label likewise is not a guarantee of unfiltered output.
+
+## Docker alternative
+
+Requires Docker Engine and the Compose plugin. Container build/runtime has **not been verified in this environment**; no published image is implied. Create a private `.env` without installing the app locally:
+
+```bash
+# After cloning and entering the repository:
+umask 077
+python3 -c 'from pathlib import Path; import secrets; p=Path(".env"); p.exists() and exit("Existing .env preserved; edit locally"); p.write_text("PANEL_TOKEN="+secrets.token_urlsafe(32)+"\nHOST=127.0.0.1\nPORT=8080\n")'
+chmod 600 .env
+docker compose up --build -d
+docker compose logs -f panel
+# Stop, retaining history:
+docker compose down
 ```
 
-**Stateless mode** — send the whole history in `messages` and omit
-`session_id`. The panel folds the transcript into the upstream `instructions`
-field, so any framework that resends history (LangChain, LlamaIndex, custom
-loops) just works.
+Compose publishes **127.0.0.1:8080** only. The container binds internally to `0.0.0.0:8080`, runs as **UID/GID 10001**, and persists `/app/data` in the named `panel-data` volume. A new volume inherits the image directory's UID/GID 10001 ownership; do not replace it with a root-owned host bind mount. Existing volumes/bind mounts require ownership preparation for 10001:10001. `docker compose down -v` **deletes stored identity/history** and is not a quota-reset mechanism. Keep a single replica. Compose requires a non-empty `PANEL_TOKEN`; `.env` is not copied into the image. Docker administrators can inspect container secrets.
 
-### Endpoints
+## Optional HTTPS quick tunnel
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/v1/models` | Model list |
-| `POST` | `/v1/chat/completions` | Chat, streaming or not |
-| `GET` | `/api/health` | Uptime, counters, pool summary |
-| `GET` | `/api/pool` | Full identity table |
-| `POST` | `/api/pool/rotate` | Discard all uids, mint fresh ones |
-| `POST` | `/api/probe` | One cheap request per speaker |
-| `POST` | `/api/chat` | Panel's own SSE stream |
-| `GET` | `/api/sessions` | Session list |
-| `GET` | `/api/sessions/{id}` | One session with turns |
-| `DELETE` | `/api/sessions/{id}` | Delete a session |
+Only if you explicitly want internet exposure, manually install [cloudflared from official instructions](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/). Start `./run.sh` locally in one terminal, then in another:
 
-## How the pool survives the rate limiter
-
-Measured during recon: two rapid requests on one uid pass, the third returns
-`{code:"ratelimit"}`. Fresh uids raise the ceiling but do not remove it, because
-the limiter also counts from the IP — so rotation alone is not enough.
-
-`core/pool.py` therefore combines:
-
-1. **Rotation** — round-robin across 12 uids, each with its own cooldown timer.
-2. **Pacing** — a global interval (starts at 1.9 s) between any two sends.
-   It backs off ×1.5 on every 429 and recovers ×0.9 after six clean responses,
-   so it settles just under the real limit instead of guessing.
-3. **Retry with backoff** — up to 5 attempts, exponential plus jitter, picking a
-   different identity each time.
-4. **Pinning** — once a chat exists, its uid is locked to that chat. A chat only
-   has history on the identity that created it; borrowing a fresh uid silently
-   wipes the context. `acquire_uid()` waits out that identity's cooldown rather
-   than taking the fast path.
-
-That last point is the one that bites anyone reimplementing this: without
-pinning, multi-turn conversations come back as "I don't know your name."
-
-## Limits observed on the free tier
-
-| Limit | Value | Error |
-|---|---|---|
-| `user_input` | 4000 chars (plus 12000, pro 20000) | `too_long` + `limits` map |
-| `instructions` | ~1980 chars | `instr_refused{reason:"too_long"}` |
-| Concurrent | 2 on trial, 8 paid | `ratelimit` |
-| Requests/min | 60 trial, 300 paid | `ratelimit` |
-
-The panel clamps `instructions` to stay under the cap by keeping the system
-prompt and truncating the oldest transcript from the front.
-
-## Layout
-
-```
-notrack-panel/
-├── app.py               FastAPI app: panel API + OpenAI shim
-├── run.sh               launcher
-├── requirements.txt
-├── core/
-│   ├── config.py        endpoints, limits, pacing knobs
-│   ├── pool.py          identity pool, cooldowns, adaptive pace
-│   ├── upstream.py      SSE client, retries, speaker probing
-│   └── store.py         sessions, turns, uid persistence
-├── static/
-│   ├── index.html
-│   ├── style.css
-│   └── app.js           SSE handling, markdown, i18n (fa/en)
-└── data/                pool + session state (created at runtime)
+```bash
+./tunnel.sh quick
 ```
 
-## Tuning
+The helper checks loopback configuration and authentication challenges before exposing the server; it does not install cloudflared. Use **only the HTTPS URL** it prints, and the same Basic/Bearer credentials. The URL is temporary, not access control. **Ctrl+C** stops the foreground tunnel; the local panel remains running. Cloudflare terminates TLS and is another trust boundary. For persistent named tunnels, follow [official setup documentation](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/); this project does not automate named setup.
 
-Environment variables:
+## Official API alternative (separate product)
 
-| Var | Default | Meaning |
-|---|---|---|
-| `PANEL_PACE` | `1.9` | Starting seconds between sends |
-| `PANEL_UA` | Chrome 131 desktop | User agent sent upstream |
-| `PANEL_DATA` | `./data` | Where state is written |
-| `PORT` / `HOST` | `8080` / `0.0.0.0` | Listen address |
+For supported API access, see <https://notrack.ai/api/docs>. The official service uses **`https://api.notrack.ai/v1`**, model **`notrack-uncensored`**, and a **real, separately paid NoTrack API key**. A panel token is not an official key. Web-chat observations and the local conservative limits above do **not** describe the official API's limits, pricing, or guarantees.
 
-If you see repeated `ratelimit` errors, raise `PANEL_PACE` — the adaptive logic
-will converge on its own, but starting closer to the real limit is faster.
+## Development
 
-State lives in `data/identities.json` and `data/sessions.json`. Delete
-`identities.json` (or hit **Rotate**) to start with a clean pool.
+```bash
+python -m pip install -r requirements.txt
+python -m unittest discover -s tests -v
+node --check static/app.js
+node --test tests/test_frontend.cjs
+bash -n install.sh run.sh tunnel.sh
+```
 
-## Known limits
+Use Python from your development virtual environment. CI installs normal pip requirements on Python **3.11 and 3.12**, runs stdlib `unittest` and offline Node frontend tests, and checks JavaScript/shell syntax. A clean install into a temporary Python 3.12 virtualenv, repeat installation preserving `.env`, and local launcher/authentication smoke checks passed during release preparation. The tunnel preflight was exercised with a fake cloudflared command, not a public tunnel. These checks do not prove current upstream model availability, Windows/macOS or systemd operation, or a Docker build.
 
-- Speaker `B` (ChatGPT) returned `The model could not be reached` during recon.
-  That is upstream, not the panel — `POST /api/probe` tells you its current state.
-- IF the upstream changes its event schema, `_map_event()` in
-  `core/upstream.py` is the one place to update.
-- Debate mode (`mode:"debate"`, multi-round A↔B↔C with consensus) exists upstream
-  but is disabled on the site itself and is not exposed here.
-- Token counts in `usage` are estimated from character length; the upstream does
-  not report real counts on this endpoint.
+Configuration: `PANEL_TOKEN` is required; `HOST`/`PORT` default to `127.0.0.1`/`8080`; `PANEL_DATA` defaults to local `data/`; `PANEL_PACE` defaults to `5.0` seconds. Restart after changing configuration. To revoke a compromised token, replace it with a new strong random value in `.env`, update clients, and restart the server/container (including any environment overrides).
+
+## Acknowledgments and license
+
+[HKUDS/CLI-Anything](https://github.com/HKUDS/CLI-Anything) was researched as **inspiration only**. No CLI-Anything generator was run or installed for this project, and no integration is claimed.
+
+MIT © 2026 **HELBOYCODER**. See [LICENSE](LICENSE). Third-party services and dependencies retain their own terms and licenses.

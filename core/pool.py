@@ -1,23 +1,29 @@
-"""Anonymous identity pool.
+"""One server-issued identity; never mint, rotate, or reset quota state.
 
-The upstream assigns every visitor an HttpOnly `uid` cookie and meters the free
-tier against it. A fresh uid therefore behaves like a fresh visitor — with one
-caveat found during recon: the limiter also counts from the IP, so rotation
-raises the ceiling but does not remove it. This pool rotates uids, tracks
-cooldowns per identity, and exposes an adaptive global pace so callers never
-have to think about it.
+ponytail: intentionally one process, one worker, one operator. The legacy pool
+API remains, but size is ignored and unknown uids are rejected.
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import math
+import os
+import tempfile
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
+from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 from . import config
+
+
+class IdentityError(Exception):
+    def __init__(self, code: str, message: str, retry_after: float = 0.0):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -30,178 +36,153 @@ class Identity:
     last_used: float = 0.0
 
     def ready(self, now: Optional[float] = None) -> bool:
-        return (now or time.time()) >= self.cooldown_until
+        return (time.time() if now is None else now) >= self.cooldown_until
 
     def wait_for(self, now: Optional[float] = None) -> float:
-        return max(0.0, self.cooldown_until - (now or time.time()))
+        return max(0.0, self.cooldown_until - (time.time() if now is None else now))
 
 
 class IdentityPool:
-    """Round-robin uid pool with per-identity cooldowns and a global pace."""
+    STATE_FILE = config.DATA_DIR / "upstream_state.json"
 
-    STATE_FILE = config.DATA_DIR / "identities.json"
-
-    def __init__(self, size: int = 12) -> None:
-        self.size = size
+    def __init__(self, size: int = 1) -> None:
+        self.size = 1  # legacy argument deliberately ignored
         self._lock = asyncio.Lock()
-        self._ids: dict[str, Identity] = {}
-        self._order: list[str] = []
-        self._cursor = 0
+        self._identity: Optional[Identity] = None
         self._last_send = 0.0
-
-        # adaptive pacing shared by all callers
         self.pace = config.PACE_MIN_INTERVAL
-        self._consecutive_429 = 0
-        self._consecutive_ok = 0
-
         self._load()
 
-    # ------------------------------------------------------------ persistence
+    @property
+    def uid(self) -> Optional[str]:
+        return self._identity.uid if self._identity else None
+
+    @staticmethod
+    def _validate_uid(uid: str) -> str:
+        try:
+            if not isinstance(uid, str) or str(uuid.UUID(uid)) != uid.lower():
+                raise ValueError
+        except (ValueError, AttributeError, TypeError):
+            raise IdentityError("invalid_identity", "Invalid upstream identity") from None
+        return uid
+
     def _load(self) -> None:
         try:
-            raw = json.loads(self.STATE_FILE.read_text())
-        except Exception:
-            raw = None
-        if raw and isinstance(raw.get("identities"), list):
-            for item in raw["identities"]:
-                try:
-                    ident = Identity(**item)
-                except Exception:
-                    continue
-                self._ids[ident.uid] = ident
-                self._order.append(ident.uid)
-        while len(self._order) < self.size:
-            self._spawn()
+            raw = json.loads(self.STATE_FILE.read_text(encoding="utf-8"))
+            ident = Identity(**raw["identity"])
+            self._validate_uid(ident.uid)
+            times = (ident.created_at, ident.cooldown_until, ident.last_used)
+            if not all(isinstance(t, (float, int)) and math.isfinite(t) and t >= 0 for t in times):
+                raise ValueError
+            if not all(isinstance(n, int) and n >= 0 for n in (ident.requests, ident.failures)):
+                raise ValueError
+            os.chmod(self.STATE_FILE, 0o600)
+            self._identity = ident
+            self._last_send = ident.last_used
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, KeyError, TypeError, IdentityError):
+            # Fail closed: corrupt state must not silently create a new visitor.
+            raise IdentityError("identity_state", "Cannot load upstream identity state") from None
 
     def _save(self) -> None:
+        if self._identity is None:
+            return
+        tmp = None
         try:
-            payload = {"identities": [asdict(i) for i in self._ids.values()]}
-            tmp = self.STATE_FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, indent=1))
-            tmp.replace(self.STATE_FILE)
-        except Exception:
-            pass
+            self.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".upstream-", dir=self.STATE_FILE.parent)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                json.dump({"identity": asdict(self._identity)}, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, self.STATE_FILE)
+        except OSError:
+            raise IdentityError("identity_state", "Cannot persist upstream identity state") from None
+        finally:
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except FileNotFoundError:
+                    pass
 
-    def _spawn(self) -> Identity:
-        ident = Identity(uid=str(uuid.uuid4()))
-        self._ids[ident.uid] = ident
-        self._order.append(ident.uid)
-        return ident
+    async def bind_uid(self, uid: str) -> Identity:
+        """Bind only the validated cookie received by the client from GET /chat."""
+        self._validate_uid(uid)
+        async with self._lock:
+            if self._identity is not None and uid != self.uid:
+                raise IdentityError("identity_mismatch", "Session does not match the stable upstream identity")
+            if self._identity is None:
+                self._identity = Identity(uid=uid)
+            self._save()
+            return self._identity
 
-    # ------------------------------------------------------------ acquisition
+    def _check_ready(self) -> Identity:
+        if self._identity is None:
+            raise IdentityError("identity_missing", "Upstream identity has not been initialized")
+        wait = self._identity.wait_for()
+        if wait > 0:
+            raise IdentityError("ratelimit", "Upstream cooldown is active", math.ceil(wait))
+        return self._identity
+
     async def acquire(self) -> Identity:
-        """Return an identity that is currently outside its cooldown.
-
-        If every identity is cooling down we wait for the one that frees up
-        first instead of hammering the upstream.
-        """
-        while True:
-            async with self._lock:
-                now = time.time()
-                n = len(self._order)
-                for step in range(n):
-                    idx = (self._cursor + step) % n
-                    ident = self._ids[self._order[idx]]
-                    if ident.ready(now):
-                        self._cursor = (idx + 1) % n
-                        ident.last_used = now
-                        ident.requests += 1
-                        self._save()
-                        return ident
-                # nothing ready — find the soonest
-                soonest = min(self._ids[u] for u in self._order)
-                wait = soonest.wait_for(now)
-            await asyncio.sleep(min(max(wait, 0.4), config.PACE_MAX_INTERVAL))
-
-    async def pace_gate(self) -> None:
-        """Block until the global inter-request interval has elapsed."""
-        while True:
-            async with self._lock:
-                now = time.time()
-                delta = now - self._last_send
-                if delta >= self.pace:
-                    self._last_send = now
-                    return
-                wait = self.pace - delta
-            await asyncio.sleep(wait)
+        async with self._lock:
+            ident = self._check_ready()
+            ident.requests += 1
+            self._save()
+            return ident
 
     async def acquire_uid(self, uid: str) -> Identity:
-        """Return the *specific* identity that owns a chat, creating it if unknown.
+        if uid != self.uid:
+            raise IdentityError("identity_mismatch", "Session does not match the stable upstream identity")
+        return await self.acquire()
 
-        Continuity matters more than throughput here: a chat only has history on
-        the uid that created it, so we wait out that identity's cooldown instead
-        of borrowing a fresh one.
-        """
+    async def pace_gate(self) -> None:
+        """Normal pacing may wait; upstream cooldown always errors immediately."""
         while True:
             async with self._lock:
-                ident = self._ids.get(uid)
-                if ident is None:
-                    ident = Identity(uid=uid)
-                    self._ids[uid] = ident
-                    self._order.append(uid)
-                    self._save()
+                ident = self._check_ready()
                 now = time.time()
-                if ident.ready(now):
-                    ident.last_used = now
-                    ident.requests += 1
+                wait = self.pace - (now - self._last_send)
+                if wait <= 0:
+                    self._last_send = ident.last_used = now
                     self._save()
-                    return ident
-                wait = ident.wait_for(now)
-            await asyncio.sleep(min(max(wait, 0.4), config.PACE_MAX_INTERVAL))
+                    return
+            await asyncio.sleep(wait)
 
-    # ------------------------------------------------------------ feedback
+    def _check_owner(self, ident: Identity) -> None:
+        if ident is not self._identity:
+            raise IdentityError("identity_mismatch", "Unknown upstream identity")
+
     async def report_ok(self, ident: Identity) -> None:
         async with self._lock:
-            self._consecutive_429 = 0
-            self._consecutive_ok += 1
-            if self._consecutive_ok >= 6 and self.pace > config.PACE_MIN_INTERVAL:
-                self.pace = max(config.PACE_MIN_INTERVAL, self.pace * 0.9)
-                self._consecutive_ok = 0
-            self._save()
+            self._check_owner(ident)
+            self._save()  # never reset cooldown or accelerate after success
 
-    async def report_429(self, ident: Identity) -> None:
+    async def report_429(self, ident: Identity, retry_after: float = 60.0) -> None:
         async with self._lock:
-            self._consecutive_ok = 0
-            self._consecutive_429 += 1
-            self.pace = min(config.PACE_MAX_INTERVAL, self.pace * 1.5)
-            # cool this identity down with exponential jitter
-            cooldown = min(60.0, 4.0 * (1.7 ** min(self._consecutive_429, 5)))
-            ident.cooldown_until = time.time() + cooldown
+            self._check_owner(ident)
+            delay = max(config.RATE_LIMIT_COOLDOWN, min(config.MAX_RETRY_AFTER, retry_after))
+            ident.cooldown_until = max(ident.cooldown_until, time.time() + delay)
             ident.failures += 1
             self._save()
 
     async def report_error(self, ident: Identity) -> None:
         async with self._lock:
+            self._check_owner(ident)
             ident.failures += 1
             self._save()
 
-    # ------------------------------------------------------------ inspection
     def stats(self) -> dict:
-        now = time.time()
         rows = []
-        for uid in self._order:
-            i = self._ids[uid]
-            rows.append({
-                "uid": i.uid,
-                "short": i.uid[:8],
-                "requests": i.requests,
-                "failures": i.failures,
-                "ready": i.ready(now),
-                "cooldown_in": round(i.wait_for(now), 1),
-            })
-        return {
-            "count": len(self._order),
-            "pace": round(self.pace, 2),
-            "ready": sum(1 for r in rows if r["ready"]),
-            "identities": rows,
-        }
+        if self._identity:
+            ident = self._identity
+            rows.append({"uid": ident.uid, "short": ident.uid[:8],
+                         "requests": ident.requests, "failures": ident.failures,
+                         "ready": ident.ready(), "cooldown_in": round(ident.wait_for(), 1)})
+        return {"count": len(rows), "ready": sum(int(r["ready"]) for r in rows),
+                "pace": round(self.pace, 2), "identities": rows}
 
     async def rotate_all(self) -> None:
-        """Discard every identity and start clean."""
-        async with self._lock:
-            self._ids.clear()
-            self._order.clear()
-            self._cursor = 0
-            while len(self._order) < self.size:
-                self._spawn()
-            self._save()
+        raise IdentityError("rotation_disabled", "Upstream identity rotation is disabled")

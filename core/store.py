@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -40,6 +41,7 @@ class SessionStore:
     FILE = config.DATA_DIR / "sessions.json"
 
     def __init__(self, limit: int = 500) -> None:
+        # ponytail: bounded single-worker JSON storage — upgrade to SQLite before multi-worker deployment.
         self.limit = limit
         self._sessions: dict[str, Session] = {}
         self._load()
@@ -66,16 +68,15 @@ class SessionStore:
                 continue
 
     def save(self) -> None:
-        try:
-            ordered = sorted(self._sessions.values(), key=lambda s: s.updated, reverse=True)
-            keep = ordered[: self.limit]
-            self._sessions = {s.id: s for s in keep}
-            payload = {"sessions": [s.to_dict() for s in keep]}
-            tmp = self.FILE.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, indent=1))
-            tmp.replace(self.FILE)
-        except Exception:
-            pass
+        ordered = sorted(self._sessions.values(), key=lambda s: s.updated, reverse=True)
+        keep = ordered[: self.limit]
+        self._sessions = {s.id: s for s in keep}
+        payload = {"sessions": [s.to_dict() for s in keep]}
+        tmp = self.FILE.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as output:
+            json.dump(payload, output, ensure_ascii=False)
+        tmp.replace(self.FILE)
 
     # ------------------------------------------------------------------ api
     def create(self, speaker: str = "C", persona: str = "normal", system: str = "") -> Session:

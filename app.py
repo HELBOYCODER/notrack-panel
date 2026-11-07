@@ -1,420 +1,348 @@
-"""NoTrack Panel — reverse-engineered gateway + control panel.
-
-Run:  python3 app.py            (default 0.0.0.0:8080)
-"""
+"""Single-operator NoTrack web adapter. Run through ./run.sh."""
 from __future__ import annotations
 
-import asyncio
+import base64
+import binascii
+import hmac
 import json
+import logging
 import time
 import uuid
-from typing import Any, Optional
+from contextlib import asynccontextmanager
+from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from core import config
 from core.pool import IdentityPool
 from core.store import SessionStore
 from core.upstream import NotrackClient, UpstreamError
 
-app = FastAPI(title="NoTrack Panel", version="1.0.0")
-
-pool = IdentityPool(size=12)
+pool = IdentityPool(size=1)
 store = SessionStore()
 client = NotrackClient(pool)
+log = logging.getLogger('notrack-panel')
+STATS = {'requests': 0, 'errors': 0, 'started': time.time()}
+# ponytail: one process and one trusted operator — upgrade to a DB and per-user ACLs before shared hosting.
+BUSY: set[str] = set()
 
-STATS = {"requests": 0, "errors": 0, "started": time.time()}
+
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    await client.close()
 
 
-# ══════════════════════════════════════════════════════════════ models
+app = FastAPI(title='NoTrack Panel', version='0.1.0', docs_url=None,
+              redoc_url=None, openapi_url=None, lifespan=lifespan)
+
+
+@app.middleware('http')
+async def private_panel(request: Request, call_next):
+    token = config.PANEL_TOKEN
+    if not token:
+        return JSONResponse({'error': {'type': 'configuration', 'message': 'Set PANEL_TOKEN before starting the panel.'}}, status_code=503)
+    authorization = request.headers.get('authorization', '')
+    supplied = ''
+    if authorization.startswith('Bearer '):
+        supplied = authorization[7:]
+    elif authorization.startswith('Basic '):
+        try:
+            username, supplied = base64.b64decode(authorization[6:], validate=True).decode().split(':', 1)
+            if username != 'panel':
+                supplied = ''
+        except (ValueError, UnicodeError, binascii.Error):
+            supplied = ''
+    if not hmac.compare_digest(supplied.encode(), token.encode()):
+        return JSONResponse({'error': {'type': 'authentication', 'message': 'Authentication required.'}},
+                            status_code=401, headers={'WWW-Authenticate': 'Basic realm="NoTrack Panel", charset="UTF-8"'})
+    if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+        origin = request.headers.get('origin')
+        if origin and origin != str(request.base_url).rstrip('/'):
+            return JSONResponse({'error': {'type': 'origin', 'message': 'Cross-origin writes are not allowed.'}}, status_code=403)
+        try:
+            if int(request.headers.get('content-length', '0')) > 65536:
+                return JSONResponse({'error': 'Request too large'}, status_code=413)
+        except ValueError:
+            return JSONResponse({'error': 'Invalid Content-Length'}, status_code=400)
+        if len(await request.body()) > 65536:
+            return JSONResponse({'error': 'Request too large'}, status_code=413)
+    response = await call_next(request)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    return response
+
+
 class ChatRequest(BaseModel):
-    message: str
-    session_id: Optional[str] = None
-    speaker: str = "C"
-    persona: str = "normal"
-    system: str = ""
+    model_config = ConfigDict(extra='forbid')
+    message: str = Field(min_length=1, max_length=4000)
+    session_id: Optional[str] = Field(default=None, max_length=64)
+    speaker: str = 'C'
+    persona: Literal['normal', 'concise', 'detailed', 'creative'] = 'normal'
+    system: str = Field(default='', max_length=1980)
+
+
+class Message(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    role: Literal['system', 'user', 'assistant']
+    content: str = Field(max_length=16000)
 
 
 class OpenAIRequest(BaseModel):
-    model: str = "notrack-uncensored"
-    messages: list[dict] = Field(default_factory=list)
+    model_config = ConfigDict(extra='forbid')
+    model: str = 'notrack-uncensored'
+    messages: list[Message] = Field(min_length=1, max_length=100)
     stream: bool = False
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
-    top_p: Optional[float] = None
-    stop: Optional[Any] = None
-    presence_penalty: Optional[float] = None
-    frequency_penalty: Optional[float] = None
-    seed: Optional[int] = None
-    n: int = 1
-    tools: Optional[list] = None
-    tool_choice: Optional[Any] = None
-    response_format: Optional[dict] = None
-    session_id: Optional[str] = None
+    session_id: Optional[str] = Field(default=None, max_length=64)
 
 
-# ══════════════════════════════════════════════════════════════ helpers
 def _speaker_from_model(model: str) -> tuple[str, str]:
-    """Map an incoming model name to (speaker_code, persona_override).
-
-    Accepts: notrack-uncensored, notrack-uncensored:notrack, minimax, chatgpt,
-             notrack-uncensored:creative, etc.
-    """
-    name = (model or "").strip()
-    persona = ""
-    if ":" in name:
-        name, persona = name.split(":", 1)
-        name = name.strip()
-        persona = persona.strip()
-
-    low = name.lower()
-    for prefix in ("notrack-", "no-track-", "nt-"):
-        if low.startswith(prefix):
-            low = low[len(prefix):]
-            break
-
-    if low in ("minimax", "a", "speaker-a", "speaker_a"):
-        return "A", persona
-    if low in ("chatgpt", "gpt", "b", "speaker-b", "speaker_b", "openai", "gpt-4", "gpt-3.5"):
-        return "B", persona
-    return "C", persona
+    name, sep, persona = model.lower().partition(':')
+    aliases = {'c': 'C', 'a': 'A', 'b': 'B', 'notrack-uncensored': 'C',
+               'minimax': 'A', 'notrack-minimax': 'A', 'chatgpt': 'B', 'notrack-chatgpt': 'B'}
+    if name not in aliases:
+        raise HTTPException(400, 'Unknown model name')
+    if sep and persona not in config.PERSONAS:
+        raise HTTPException(400, 'Unsupported persona; web adapter supports normal, concise, detailed, creative only')
+    return aliases[name], persona
 
 
-def _flatten_messages(messages: list[dict]) -> tuple[str, str]:
-    """Split an OpenAI message array into (system_prompt, final_user_text).
-
-    The upstream takes one user_input + one instructions blob. Earlier turns are
-    folded into the instructions as a transcript so multi-turn clients keep
-    their context even without a stored session.
-    """
-    system_parts: list[str] = []
-    convo: list[dict] = []
-
-    for m in messages:
-        role = m.get("role", "user")
-        content = m.get("content", "")
-        if isinstance(content, list):  # multimodal content parts
-            content = " ".join(
-                p.get("text", "") for p in content if isinstance(p, dict)
-            )
-        content = str(content)
-        if role == "system":
-            system_parts.append(content)
-        else:
-            convo.append({"role": role, "content": content})
-
-    last_user = ""
-    for m in reversed(convo):
-        if m["role"] == "user":
-            last_user = m["content"]
-            break
-
-    prior = [m for m in convo if m is not convo[-1] or m["content"] != last_user]
-    # everything before the final user message becomes context
-    idx = len(convo) - 1 - next(
-        (i for i, m in enumerate(reversed(convo)) if m["role"] == "user"), 0
-    )
-    prior = convo[:idx] if idx >= 0 else []
-
-    transcript = ""
+def _flatten_messages(messages: list[Message]) -> tuple[str, str]:
+    if messages[-1].role != 'user' or not messages[-1].content.strip():
+        raise HTTPException(400, 'The last message must be a nonempty user message')
+    systems = [m.content for m in messages[:-1] if m.role == 'system']
+    prior = [f'{m.role.title()}: {m.content}' for m in messages[:-1] if m.role != 'system']
+    context = '\n\n'.join(systems)
     if prior:
-        lines = []
-        for m in prior:
-            who = "User" if m["role"] == "user" else "Assistant"
-            lines.append(f"{who}: {m['content']}")
-        transcript = "\n\n[Conversation so far]\n" + "\n".join(lines)
-
-    system = "\n\n".join(system_parts)
-    budget = config.INSTRUCTION_CHAR_CAP
-    combined = (system + transcript).strip()
-
-    if len(combined) > budget:
-        # keep the system prompt, truncate the older transcript from the front
-        keep_sys = system[:budget]
-        room = budget - len(keep_sys) - len("\n\n[Conversation so far]\n")
-        if room > 200:
-            tail = transcript[-room:] if len(transcript) > room else transcript
-            combined = keep_sys + "\n\n[Conversation so far]\n" + tail
-        else:
-            combined = keep_sys
-
-    return combined, last_user
+        context += '\n\n[Conversation so far]\n' + '\n'.join(prior)
+    context = context.strip()
+    if len(context) > config.INSTRUCTION_CHAR_CAP:
+        raise HTTPException(400, 'History/system prompt exceeds web instructions cap; use session_id or the official API. Nothing was truncated.')
+    if len(messages[-1].content) > config.USER_INPUT_CAP:
+        raise HTTPException(400, 'User input exceeds web limit')
+    return context, messages[-1].content
 
 
-def _openai_response(content: str, model: str, usage: dict) -> dict:
-    return {
-        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": content},
-            "finish_reason": "stop",
-        }],
-        "usage": usage,
-    }
+def _session(sid, speaker, persona, system):
+    sess = store.get(sid) if sid else None
+    if sid and sess is None:
+        raise HTTPException(404, 'No such session')
+    if sess:
+        if sess.speaker != speaker or (system and system != sess.system):
+            raise HTTPException(409, 'Create a new chat to change model or system prompt')
+    else:
+        sess = store.create(speaker=speaker, persona=persona, system=system)
+    if sess.id in BUSY:
+        raise HTTPException(409, 'This session already has a request in progress')
+    return sess
 
 
-def _approx_usage(prompt: str, completion: str) -> dict:
-    pt = max(1, len(prompt) // 4)
-    ct = max(1, len(completion) // 4)
-    return {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
+def _event(data):
+    return 'data: ' + json.dumps(data, ensure_ascii=False) + '\n\n'
 
 
-# ══════════════════════════════════════════════════════════════ panel api
-@app.get("/api/health")
+def _error(ev):
+    if ev.type in {'error', 'instr_refused'}:
+        raise UpstreamError(ev.code or ev.type, ev.text or 'Upstream refused the request')
+
+
+def _status(exc):
+    if exc.code in {'ratelimit', 'rate_limit', 'cooldown'}:
+        return 429
+    if exc.code in {'input_too_long', 'instruction_too_long', 'instruction_refused'}:
+        return 400
+    return 502
+
+
+@app.get('/api/health')
 async def health():
-    return {
-        "ok": True,
-        "uptime": round(time.time() - STATS["started"], 1),
-        "requests": STATS["requests"],
-        "errors": STATS["errors"],
-        "pool": {k: v for k, v in pool.stats().items() if k != "identities"},
-    }
+    return {'ok': True, 'uptime': round(time.time() - STATS['started'], 1),
+            'requests': STATS['requests'], 'errors': STATS['errors'],
+            'pool': {k: v for k, v in pool.stats().items() if k != 'identities'}}
 
 
-@app.get("/api/pool")
+@app.get('/api/pool')
 async def pool_stats():
-    return pool.stats()
+    result = pool.stats()
+    result['identities'] = [{k: v for k, v in item.items() if k != 'uid'} for item in result['identities']]
+    return result
 
 
-@app.post("/api/pool/rotate")
-async def pool_rotate():
-    await pool.rotate_all()
-    return {"ok": True, "pool": pool.stats()}
-
-
-@app.get("/api/models")
+@app.get('/api/models')
+@app.get('/v1/models')
 async def models():
-    data = [{
-        "id": "notrack-uncensored",
-        "object": "model",
-        "created": int(STATS["started"]),
-        "owned_by": "notrack",
-    }]
-    for s in config.SPEAKERS.values():
-        if not s["default"]:
-            data.append({
-                "id": f"notrack-{s['name'].lower()}",
-                "object": "model",
-                "created": int(STATS["started"]),
-                "owned_by": s["vendor"],
-            })
-    return {"object": "list", "data": data}
+    return {'object': 'list', 'data': [
+        {'id': 'notrack-uncensored', 'object': 'model', 'owned_by': 'unverified-web-label'},
+        {'id': 'notrack-minimax', 'object': 'model', 'owned_by': 'unverified-web-label', 'experimental': True},
+        {'id': 'notrack-chatgpt', 'object': 'model', 'owned_by': 'unverified-web-label', 'experimental': True}]}
 
 
-@app.post("/api/probe")
+@app.post('/api/probe')
 async def probe():
-    results = []
-    for sid in config.SPEAKERS:
-        results.append(await client.probe_speaker(sid))
-        await asyncio.sleep(1.5)
-    return {"results": results, "at": time.time()}
+    return {'results': [await client.probe_speaker(s) for s in config.SPEAKERS], 'at': time.time()}
 
 
-@app.get("/api/sessions")
+@app.get('/api/sessions')
 async def sessions():
-    return {"sessions": store.list()}
+    return {'sessions': store.list()}
 
 
-@app.delete("/api/sessions/{sid}")
-async def session_delete(sid: str):
-    return {"ok": store.delete(sid)}
-
-
-@app.get("/api/sessions/{sid}")
+@app.get('/api/sessions/{sid}')
 async def session_get(sid: str):
     sess = store.get(sid)
     if not sess:
-        raise HTTPException(404, "no such session")
-    return sess.to_dict()
+        raise HTTPException(404, 'No such session')
+    result = sess.to_dict()
+    result.pop('uid', None)
+    return result
 
 
-# ────────────────────────────────────────── panel chat (streaming)
-@app.post("/api/chat")
+@app.delete('/api/sessions/{sid}')
+async def session_delete(sid: str):
+    if sid in BUSY:
+        raise HTTPException(409, 'Session in progress')
+    return {'ok': store.delete(sid)}
+
+
+async def _turn(sess, text, speaker, persona):
+    """Normalize a turn; never pretend partial/error output is complete."""
+    content = ''
+    BUSY.add(sess.id)
+    try:
+        async for ev in client.dispatch_stream(text, model=speaker, persona=persona,
+                chat_id=sess.chat_id, instructions=sess.system or None, pin_uid=sess.uid):
+            _error(ev)
+            if ev.uid:
+                sess.uid = ev.uid
+            if ev.type == 'chat_meta' and ev.chat_id:
+                sess.chat_id = ev.chat_id
+                store.save()
+            if ev.type == 'delta':
+                content += ev.text
+                yield ev
+            elif ev.type == 'message':
+                if content and not ev.text.startswith(content):
+                    raise UpstreamError('stream_mismatch', 'Final answer differs from streamed text')
+                suffix = ev.text[len(content):]
+                content = ev.text
+                if suffix:
+                    from core.upstream import StreamEvent
+                    yield StreamEvent('delta', text=suffix, speaker=ev.speaker)
+            elif ev.type == 'thinking':
+                yield ev
+        if not content:
+            raise UpstreamError('empty', 'Upstream returned no answer')
+        store.append(sess, 'user', text)
+        store.append(sess, 'assistant', content, speaker=speaker)
+    finally:
+        BUSY.discard(sess.id)
+
+
+@app.post('/api/chat')
 async def panel_chat(req: ChatRequest):
-    STATS["requests"] += 1
-    speaker, persona_override = _speaker_from_model(req.speaker)
-    persona = persona_override or req.persona
-
-    sess = store.get(req.session_id) if req.session_id else None
-    if sess is None:
-        sess = store.create(speaker=speaker, persona=persona, system=req.system)
-    else:
-        if req.system:
-            sess.system = req.system
-        sess.persona = persona
-
-    store.append(sess, "user", req.message)
+    speaker, override = _speaker_from_model(req.speaker)
+    persona = override or req.persona
+    sess = _session(req.session_id, speaker, persona, req.system)
+    BUSY.add(sess.id)
+    STATS['requests'] += 1
 
     async def gen():
-        collected: list[str] = []
         try:
-            # meta first so the client learns the session id immediately
-            yield f"data: {json.dumps({'type':'session','session_id':sess.id,'chat_id':sess.chat_id})}\n\n"
-            async for ev in client.dispatch_stream(
-                req.message,
-                model=speaker,
-                persona=persona,
-                chat_id=sess.chat_id,
-                instructions=sess.system or None,
-                pin_uid=sess.uid,
-            ):
-                if ev.uid:
-                    sess.uid = ev.uid
-                if ev.type == "chat_meta" and ev.chat_id:
-                    sess.chat_id = ev.chat_id
-                if ev.type == "delta":
-                    collected.append(ev.text)
-                    yield f"data: {json.dumps({'type':'delta','text':ev.text,'speaker':ev.speaker})}\n\n"
-                elif ev.type == "message":
-                    collected = [ev.text]
-                    yield f"data: {json.dumps({'type':'message','text':ev.text,'speaker':ev.speaker})}\n\n"
-                elif ev.type == "thinking":
-                    yield f"data: {json.dumps({'type':'thinking','speaker':ev.speaker})}\n\n"
-                elif ev.type in ("error", "instr_refused"):
-                    yield f"data: {json.dumps({'type':'error','code':ev.code,'text':ev.text})}\n\n"
-            final = "".join(collected)
-            store.append(sess, "assistant", final, speaker=speaker)
-            yield f"data: {json.dumps({'type':'done','session_id':sess.id,'chat_id':sess.chat_id})}\n\n"
+            yield _event({'type': 'session', 'session_id': sess.id})
+            async for ev in _turn(sess, req.message, speaker, persona):
+                yield _event({'type': ev.type, 'text': ev.text, 'speaker': ev.speaker})
+            yield _event({'type': 'done', 'session_id': sess.id})
         except UpstreamError as exc:
-            STATS["errors"] += 1
-            yield f"data: {json.dumps({'type':'error','code':exc.code,'text':exc.message})}\n\n"
-        except Exception as exc:
-            STATS["errors"] += 1
-            yield f"data: {json.dumps({'type':'error','code':'internal','text':str(exc)})}\n\n"
-
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-# ══════════════════════════════════════════════════════════════ OpenAI shim
-@app.get("/v1/models")
-async def v1_models():
-    return await models()
+            STATS['errors'] += 1
+            yield _event({'type': 'error', 'code': exc.code, 'text': exc.message})
+        except Exception:
+            STATS['errors'] += 1
+            log.error('Panel turn failed (details withheld)')
+            yield _event({'type': 'error', 'code': 'internal', 'text': 'Request failed'})
+        finally:
+            BUSY.discard(sess.id)
+    return StreamingResponse(gen(), media_type='text/event-stream',
+                             headers={'X-Accel-Buffering': 'no'})
 
 
-@app.post("/v1/chat/completions")
-async def v1_chat(req: OpenAIRequest, request: Request):
-    STATS["requests"] += 1
-    speaker, persona_override = _speaker_from_model(req.model)
-    system, user_text = _flatten_messages(req.messages)
+@app.post('/v1/chat/completions')
+async def v1_chat(req: OpenAIRequest):
+    speaker, override = _speaker_from_model(req.model)
+    persona = override or 'normal'
+    if req.session_id:
+        # Existing sessions carry their own history. Accept only a final user turn
+        # plus an optional unchanged system prompt; never silently discard history.
+        if any(m.role == 'assistant' for m in req.messages) or sum(m.role == 'user' for m in req.messages) != 1:
+            raise HTTPException(400, 'With session_id send only the new user message and optional unchanged system prompt')
+    system, text = _flatten_messages(req.messages)
+    sess = _session(req.session_id, speaker, persona, system)
+    BUSY.add(sess.id)
+    STATS['requests'] += 1
+    rid = 'chatcmpl-' + uuid.uuid4().hex
+    created = int(time.time())
 
-    if not user_text:
-        raise HTTPException(400, "no user message found")
-
-    persona = persona_override or "normal"
-
-    # Reuse an upstream chat when the caller passes session_id, else start fresh.
-    chat_id = None
-    sess = store.get(req.session_id) if req.session_id else None
-    if sess and sess.chat_id:
-        chat_id = sess.chat_id
-    if sess is None:
-        sess = store.create(speaker=speaker, persona=persona, system=system)
-        if req.session_id:
-            store._sessions[req.session_id] = sess  # honour caller's id
-
-    instructions = system if not chat_id else None
-    model_name = req.model
+    def chunk(delta, reason=None):
+        return {'id': rid, 'object': 'chat.completion.chunk', 'created': created,
+                'model': req.model, 'session_id': sess.id,
+                'choices': [{'index': 0, 'delta': delta, 'finish_reason': reason}]}
 
     if req.stream:
         async def sse():
-            collected: list[str] = []
-            created = int(time.time())
-            rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-            first = {
-                "id": rid, "object": "chat.completion.chunk", "created": created,
-                "model": model_name,
-                "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(first)}\n\n"
             try:
-                async for ev in client.dispatch_stream(
-                    user_text, model=speaker, persona=persona,
-                    chat_id=chat_id, instructions=instructions,
-                    pin_uid=sess.uid,
-                ):
-                    if ev.uid:
-                        sess.uid = ev.uid
-                    if ev.type == "chat_meta" and ev.chat_id:
-                        sess.chat_id = ev.chat_id
-                        yield f"data: {json.dumps({'type':'session','chat_id':ev.chat_id,'session_id':sess.id})}\n\n"
-                    elif ev.type == "delta" and ev.text:
-                        collected.append(ev.text)
-                        chunk = {
-                            "id": rid, "object": "chat.completion.chunk", "created": created,
-                            "model": model_name,
-                            "choices": [{"index": 0, "delta": {"content": ev.text}, "finish_reason": None}],
-                        }
-                        yield f"data: {json.dumps(chunk)}\n\n"
-                    elif ev.type == "message":
-                        collected = [ev.text]
-                final = "".join(collected)
-                store.append(sess, "user", user_text)
-                store.append(sess, "assistant", final, speaker=speaker)
-                tail = {
-                    "id": rid, "object": "chat.completion.chunk", "created": created,
-                    "model": model_name,
-                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                    "usage": _approx_usage(system + user_text, final),
-                }
-                yield f"data: {json.dumps(tail)}\n\n"
-                yield "data: [DONE]\n\n"
+                yield _event(chunk({'role': 'assistant'}))
+                async for ev in _turn(sess, text, speaker, persona):
+                    if ev.type == 'delta':
+                        yield _event(chunk({'content': ev.text}))
+                yield _event(chunk({}, 'stop'))
             except UpstreamError as exc:
-                err = {"error": {"type": exc.code, "message": exc.message}}
-                yield f"data: {json.dumps(err)}\n\n"
-                yield "data: [DONE]\n\n"
-            except Exception as exc:
-                err = {"error": {"type": "internal", "message": str(exc)}}
-                yield f"data: {json.dumps(err)}\n\n"
-                yield "data: [DONE]\n\n"
+                STATS['errors'] += 1
+                yield _event({'error': {'type': exc.code, 'message': exc.message}})
+            except Exception:
+                STATS['errors'] += 1
+                log.error('API stream failed (details withheld)')
+                yield _event({'error': {'type': 'internal', 'message': 'Request failed'}})
+            finally:
+                BUSY.discard(sess.id)
+            yield 'data: [DONE]\n\n'
+        return StreamingResponse(sse(), media_type='text/event-stream',
+                headers={'X-Session-Id': sess.id, 'X-Accel-Buffering': 'no'})
 
-        return StreamingResponse(sse(), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-    # ---------------------------------------------------------- non-stream
     try:
-        res = await client.complete(
-            user_text, model=speaker, persona=persona,
-            chat_id=chat_id, instructions=instructions,
-            pin_uid=sess.uid,
-        )
-        if sess.chat_id is None:
-            sess.chat_id = res.get("chat_id")
-        if not sess.uid and res.get("uid"):
-            sess.uid = res["uid"]
-        store.append(sess, "user", user_text)
-        store.append(sess, "assistant", res["content"], speaker=speaker)
-        out = _openai_response(
-            res["content"], model_name,
-            _approx_usage(system + user_text, res["content"]),
-        )
-        out["session_id"] = sess.id
-        if sess.chat_id:
-            out["notrack_chat_id"] = sess.chat_id
-        return JSONResponse(out)
+        parts = []
+        async for ev in _turn(sess, text, speaker, persona):
+            if ev.type == 'delta':
+                parts.append(ev.text)
+        return {'id': rid, 'object': 'chat.completion', 'created': created,
+                'model': req.model, 'session_id': sess.id,
+                'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': ''.join(parts)}, 'finish_reason': 'stop'}]}
     except UpstreamError as exc:
-        STATS["errors"] += 1
-        status = 429 if exc.code in ("ratelimit", "exhausted") else 502
-        return JSONResponse(
-            {"error": {"type": exc.code, "message": exc.message}}, status_code=status
-        )
+        STATS['errors'] += 1
+        return JSONResponse({'error': {'type': exc.code, 'message': exc.message}}, status_code=_status(exc),
+                headers={'Retry-After': str(int(exc.detail.get('retry_after', 60)))} if _status(exc) == 429 else None)
+    except Exception:
+        STATS['errors'] += 1
+        log.error('API request failed (details withheld)')
+        return JSONResponse({'error': {'type': 'internal', 'message': 'Request failed'}}, status_code=500)
+    finally:
+        BUSY.discard(sess.id)
 
 
-# ══════════════════════════════════════════════════════════════ static
-app.mount("/static", StaticFiles(directory=str(config.BASE_DIR / "static")), name="static")
+app.mount('/static', StaticFiles(directory=str(config.BASE_DIR / 'static')), name='static')
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get('/', response_class=HTMLResponse)
 async def index():
-    return (config.BASE_DIR / "static" / "index.html").read_text(encoding="utf-8")
+    return (config.BASE_DIR / 'static' / 'index.html').read_text(encoding='utf-8')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
+    import os
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
+    uvicorn.run(app, host=os.environ.get('HOST', '127.0.0.1'),
+                port=int(os.environ.get('PORT', '8080')), log_level='info')

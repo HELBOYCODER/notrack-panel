@@ -5,7 +5,7 @@
   const $ = (id) => document.getElementById(id);
   const el = {
     sidebar: $('sidebar'), closeSide: $('closeSide'), openSide: $('openSide'),
-    flow: $('flow'), empty: $('emptyState'),
+    flow: $('flow'), empty: $('emptyState'), settingsPanel: $('settingsPanel'),
     input: $('input'), composer: $('composer'),
     sendBtn: $('sendBtn'), stopBtn: $('stopBtn'),
     speakerSel: $('speakerSel'), personaSel: $('personaSel'),
@@ -15,7 +15,7 @@
     statusPill: $('statusPill'), sessionPill: $('sessionPill'), clock: $('clock'),
     poolCount: $('poolCount'), poolReady: $('poolReady'), poolPace: $('poolPace'),
     poolReqs: $('poolReqs'), poolErrs: $('poolErrs'), poolList: $('poolList'),
-    refreshPool: $('refreshPool'), rotatePool: $('rotatePool'),
+    refreshPool: $('refreshPool'),
     apiSnippet: $('apiSnippet'), copySnippet: $('copySnippet'), langToggle: $('langToggle'),
   };
 
@@ -27,39 +27,39 @@
     system: '',
     streaming: false,
     abort: null,
-    lang: localStorage.getItem('nt.lang') || 'fa',
+    lang: ['fa', 'en'].includes(localStorage.getItem('nt.lang')) ? localStorage.getItem('nt.lang') : 'fa',
   };
 
   /* ═════════════════ i18n ═════════════════ */
   const I18N = {
     fa: {
-      brand_sub: 'پنل کنترل', tab_chat: 'گفتگو', tab_pool: 'استخر', tab_api: 'API',
+      brand_sub: 'پنل کنترل', tab_chat: 'گفتگو', tab_pool: 'وضعیت', tab_api: 'API',
       lbl_speaker: 'مدل', lbl_persona: 'شخصیت', lbl_system: 'پرامپت سیستم',
       p_normal: 'عادی', p_concise: 'مختصر', p_detailed: 'مفصل', p_creative: 'خلاق',
       sys_hint: 'فقط روی چت جدید اعمال می‌شود',
       btn_new: 'چت جدید', btn_probe: 'تست زنده‌بودن مدل‌ها',
-      pool_ids: 'هویت‌ها', pool_ready: 'آماده', pool_pace: 'فاصله ارسال',
+      pool_ids: 'نشست سرویس', pool_ready: 'آماده', pool_pace: 'فاصله ارسال',
       pool_reqs: 'درخواست‌ها', pool_errs: 'خطاها',
       btn_refresh: 'بروزرسانی', btn_rotate: 'چرخش همه هویت‌ها',
       api_hint: 'این پنل یک اندپوینت سازگار با OpenAI هم ارائه می‌دهد.',
       btn_copy: 'کپی', sessions: 'نشست‌ها',
-      empty_h: 'آماده', empty_p: 'پیامت را بنویس. فیلتری نیست.', ph_msg: 'پیام…',
+      empty_h: 'آماده', empty_p: 'پیامت را بنویس؛ پاسخ و محدودیت‌ها تابع سرویس اصلی است.', ph_msg: 'پیام…',
       you: 'شما', ready: 'متصل', connecting: 'اتصال…', error: 'خطا',
       thinking: 'در حال فکر کردن', stopped: 'متوقف شد',
       lang_btn: 'English',
     },
     en: {
-      brand_sub: 'Control panel', tab_chat: 'Chat', tab_pool: 'Pool', tab_api: 'API',
+      brand_sub: 'Control panel', tab_chat: 'Chat', tab_pool: 'Status', tab_api: 'API',
       lbl_speaker: 'Model', lbl_persona: 'Persona', lbl_system: 'System prompt',
       p_normal: 'Normal', p_concise: 'Concise', p_detailed: 'Detailed', p_creative: 'Creative',
       sys_hint: 'Applies to new chats only',
       btn_new: 'New chat', btn_probe: 'Probe model liveness',
-      pool_ids: 'Identities', pool_ready: 'Ready', pool_pace: 'Send interval',
+      pool_ids: 'Service session', pool_ready: 'Ready', pool_pace: 'Send interval',
       pool_reqs: 'Requests', pool_errs: 'Errors',
       btn_refresh: 'Refresh', btn_rotate: 'Rotate all identities',
       api_hint: 'This panel also exposes an OpenAI-compatible endpoint.',
       btn_copy: 'Copy', sessions: 'Sessions',
-      empty_h: 'Ready', empty_p: 'Type your message. No filter.', ph_msg: 'Message…',
+      empty_h: 'Ready', empty_p: 'Type a message. Upstream availability and policies apply.', ph_msg: 'Message…',
       you: 'You', ready: 'connected', connecting: 'connecting…', error: 'error',
       thinking: 'thinking', stopped: 'stopped',
       lang_btn: 'فارسی',
@@ -219,6 +219,8 @@
 
     let acc = '';
     let gotDelta = false;
+    let streamFailed = false;
+    let streamDone = false;
     const ctrl = new AbortController();
     state.abort = ctrl;
 
@@ -270,18 +272,20 @@
             node.body.innerHTML = mdToHtml(acc);
             scrollDown();
           } else if (ev.type === 'error') {
-            node.body.innerHTML = '';
-            node.wrap.remove();
+            streamFailed = true;
+            if (!acc) node.wrap.remove();
             addError(ev.code, ev.text);
           } else if (ev.type === 'done') {
+            streamDone = true;
             if (ev.chat_id) state.chatId = ev.chat_id;
             if (ev.session_id) state.sessionId = ev.session_id;
           }
         }
       }
 
+      if (!streamDone && !streamFailed) addError('stream_interrupted', 'Incomplete response; partial text was not saved as a completed turn.');
       if (gotDelta) node.body.innerHTML = mdToHtml(acc);
-      else if (!acc) node.body.innerHTML = '<p style="color:#6b7480">(empty)</p>';
+      else if (!acc && !streamFailed) node.body.innerHTML = '<p style="color:#6b7480">(empty)</p>';
       refreshSessions();
 
     } catch (e) {
@@ -320,6 +324,7 @@
   }
 
   async function loadSession(sid) {
+    if (state.streaming) return;
     try {
       const r = await fetch('/api/sessions/' + encodeURIComponent(sid));
       if (!r.ok) return;
@@ -330,6 +335,8 @@
       state.persona = s.persona;
       el.speakerSel.value = s.speaker;
       el.personaSel.value = s.persona;
+      el.systemIn.value = s.system;
+      el.sysCount.textContent = s.system.length;
       el.sessionPill.textContent = s.id.slice(0, 12);
 
       el.flow.innerHTML = '';
@@ -344,6 +351,7 @@
   }
 
   function newChat() {
+    if (state.streaming) return;
     state.sessionId = null;
     state.chatId = null;
     el.flow.innerHTML = '';
@@ -418,11 +426,6 @@
   el.probeBtn.addEventListener('click', probe);
   el.refreshPool.addEventListener('click', refreshPool);
   el.refreshSessions.addEventListener('click', refreshSessions);
-  el.rotatePool.addEventListener('click', async () => {
-    el.rotatePool.disabled = true;
-    try { await fetch('/api/pool/rotate', { method: 'POST' }); await refreshPool(); }
-    finally { el.rotatePool.disabled = false; }
-  });
   el.openSide.addEventListener('click', () => el.sidebar.classList.add('open'));
   el.closeSide.addEventListener('click', closeSidebar);
   el.langToggle.addEventListener('click', () => {
@@ -448,7 +451,6 @@
       $('poolPanel').classList.toggle('hidden', p !== 'pool');
       $('apiPanel').classList.toggle('hidden', p !== 'api');
       if (p === 'pool') refreshPool();
-      closeSidebar();
     });
   });
 
@@ -461,9 +463,10 @@
   // init
   const origin = location.origin;
   el.apiSnippet.textContent =
-`from openai import OpenAI
+`import os
+from openai import OpenAI
 c = OpenAI(base_url="${origin}/v1",
-           api_key="panel")
+           api_key=os.environ["PANEL_TOKEN"])
 
 r = c.chat.completions.create(
     model="notrack-uncensored",
